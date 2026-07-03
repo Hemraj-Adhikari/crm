@@ -1,0 +1,140 @@
+rules_version = '2';
+
+// -----------------------------------------------------------------------
+// Firestore Security Rules — mirrors src/core/types/rbac.ts
+// This is the REAL security boundary; client-side `can()` checks are only
+// a UX convenience to hide/disable controls the user can't use anyway.
+// -----------------------------------------------------------------------
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function role() {
+      return isSignedIn() ? userDoc().data.role : null;
+    }
+
+    function isActive() {
+      return isSignedIn() && userDoc().data.isActive == true;
+    }
+
+    function hasRole(roles) {
+      return isSignedIn() && isActive() && role() in roles;
+    }
+
+    // super_admin bypasses all per-resource checks below.
+    function isSuperAdmin() {
+      return hasRole(['super_admin']);
+    }
+
+    // ---- users ----
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || hasRole(['super_admin', 'admin']));
+      allow create, update: if isSuperAdmin() || hasRole(['admin']);
+      allow delete: if isSuperAdmin();
+    }
+
+    // ---- leads ----
+    match /leads/{leadId} {
+      allow read: if hasRole(['super_admin', 'admin', 'counselor', 'channel_partner']);
+      allow create: if hasRole(['super_admin', 'admin', 'counselor', 'channel_partner']);
+      allow update: if hasRole(['super_admin', 'admin', 'counselor']);
+      allow delete: if hasRole(['super_admin', 'admin']);
+    }
+
+    // ---- students ----
+    match /students/{studentId} {
+      allow read: if hasRole(['super_admin', 'admin', 'counselor', 'document_officer', 'application_user', 'channel_partner', 'finance_officer']);
+      allow create, update: if hasRole(['super_admin', 'admin', 'counselor', 'document_officer']);
+      allow delete: if hasRole(['super_admin', 'admin']);
+    }
+
+    // ---- applications ----
+    match /applications/{applicationId} {
+      allow read: if hasRole(['super_admin', 'admin', 'counselor', 'document_officer', 'application_user', 'channel_partner']);
+      allow create, update: if hasRole(['super_admin', 'admin', 'counselor', 'document_officer']);
+      allow delete: if hasRole(['super_admin', 'admin']);
+    }
+
+    // ---- offer letters / CAS / visa (document officer territory) ----
+    match /offerLetters/{docId} {
+      allow read: if hasRole(['super_admin', 'admin', 'document_officer', 'counselor']);
+      allow write: if hasRole(['super_admin', 'admin', 'document_officer']);
+    }
+    match /casRecords/{docId} {
+      allow read: if hasRole(['super_admin', 'admin', 'document_officer', 'counselor']);
+      allow write: if hasRole(['super_admin', 'admin', 'document_officer']);
+    }
+    match /visaCases/{docId} {
+      allow read: if hasRole(['super_admin', 'admin', 'document_officer']);
+      allow write: if hasRole(['super_admin', 'admin', 'document_officer']);
+    }
+
+    // ---- finance (strictly scoped) ----
+    match /financeTransactions/{docId} {
+      allow read: if hasRole(['super_admin', 'admin', 'finance_officer']);
+      allow create, update: if hasRole(['super_admin', 'finance_officer']);
+      allow delete: if isSuperAdmin();
+    }
+
+    // ---- universities / courses: broadly readable reference data ----
+    match /universities/{docId} {
+      allow read: if isActive();
+      allow write: if hasRole(['super_admin', 'admin']);
+    }
+    match /courses/{docId} {
+      allow read: if isActive();
+      allow write: if hasRole(['super_admin', 'admin']);
+    }
+
+    // ---- dashboard snapshots: written ONLY by Cloud Functions (admin SDK
+    // bypasses rules), clients get read-only real-time access ----
+    match /dashboardSnapshots/{branchId} {
+      allow read: if isActive();
+      allow write: if false;
+    }
+
+    // ---- audit logs: append-only, never editable/deletable by clients ----
+    match /auditLogs/{logId} {
+      allow read: if hasRole(['super_admin', 'admin']);
+      allow create: if isActive();
+      allow update, delete: if false;
+    }
+
+    // ---- tasks / calendar / messaging / notifications / documents:
+    // any active user can read/write their own scoped records ----
+    match /tasks/{docId} {
+      allow read, write: if isActive();
+    }
+    match /calendarEvents/{docId} {
+      allow read, write: if isActive();
+    }
+    match /chatThreads/{threadId} {
+      allow read: if isActive() && request.auth.uid in resource.data.participantIds;
+      allow create: if isActive();
+      match /messages/{messageId} {
+        allow read, create: if isActive();
+        allow update, delete: if false;
+      }
+    }
+    match /notifications/{docId} {
+      allow read, update: if isActive() && resource.data.recipientId == request.auth.uid;
+      allow create: if isActive();
+      allow delete: if false;
+    }
+    match /documents/{docId} {
+      allow read, write: if isActive();
+    }
+
+    // Default deny for anything not explicitly matched above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
